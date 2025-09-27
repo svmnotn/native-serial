@@ -1,0 +1,26 @@
+
+[package]
+authors     = ["Victor M. Suarez <root@svmnotn.dev>"]
+description = "Native serial port bindings for Node.js using napi-rs"
+edition     = "2021"
+homepage    = "https://github.com/svmnotn/native-serial#readme"
+license     = "MIT"
+name        = "native_serial"
+repository  = "https://github.com/svmnotn/native-serial"
+version     = "0.1.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+crossbeam   = "0.8.2"
+napi        = "3.3.0"
+napi-derive = "3.2.5"
+serialport  = "4.7.3"
+
+[build-dependencies]
+napi-build = "2.2.3"
+
+[profile.release]
+lto   = true
+strip = "symbols"
