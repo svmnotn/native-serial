@@ -7,7 +7,7 @@ homepage    = "https://github.com/svmnotn/native-serial#readme"
 license     = "MIT"
 name        = "native_serial"
 repository  = "https://github.com/svmnotn/native-serial"
-version     = "1.2.0"
+version     = "1.2.1"
 
 [lib]
 crate-type = ["cdylib"]
