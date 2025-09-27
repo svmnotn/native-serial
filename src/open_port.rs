@@ -15,9 +15,9 @@ pub struct OpenPort {
   // worker thread that owns the port and performs both reads and writes
   worker_thread: Option<thread::JoinHandle<()>>,
   // TSFN shared between JS setter and worker
-  tsfn: SharedTsfn,
+  tsfn: SharedTsfn<Buffer>,
   // separate TSFN for write errors
-  write_error_tsfn: SharedTsfn,
+  write_error_tsfn: SharedTsfn<()>,
   // sender for control / write commands
   cmd_tx: Sender<Command>,
 }
@@ -57,7 +57,7 @@ impl OpenPort {
   #[napi(js_name = "onWriteError")]
   pub fn set_on_write_error(
     &self,
-    callback: Option<ThreadsafeFunction<Buffer, ()>>,
+    callback: Option<ThreadsafeFunction<(), ()>>,
   ) -> napi::Result<()> {
     // Drop existing TSFN
     {
@@ -140,7 +140,7 @@ fn apply_builder_settings(
   builder
 }
 
-pub fn open_port(port_path: String, settings: Option<PortSettings>) -> napi::Result<OpenPort> {
+pub fn open_port(port_path: &str, settings: Option<PortSettings>) -> napi::Result<OpenPort> {
   let settings = settings.unwrap_or(PortSettings {
     baud_rate: Some(115_200),
     timeout_ms: Some(10),
@@ -151,10 +151,9 @@ pub fn open_port(port_path: String, settings: Option<PortSettings>) -> napi::Res
   });
 
   let baud = settings.baud_rate.unwrap_or(115_200);
-  let timeout_ms = settings.timeout_ms.unwrap_or(10);
-  let timeout = Duration::from_millis(timeout_ms as u64);
+  let timeout = Duration::from_millis(settings.timeout_ms.unwrap_or(10) as u64);
 
-  let builder = serialport::new(port_path.clone(), baud);
+  let builder = serialport::new(port_path, baud);
   let builder = apply_builder_settings(builder, &settings).timeout(timeout);
 
   let sp = builder
@@ -162,8 +161,8 @@ pub fn open_port(port_path: String, settings: Option<PortSettings>) -> napi::Res
     .map_err(|e| napi::Error::from_reason(format!("failed to open {}: {}", port_path, e)))?;
 
   // TSFN holder shared with API setter and worker
-  let tsfn_holder: SharedTsfn = Arc::new(Mutex::new(None));
-  let write_error_holder: SharedTsfn = Arc::new(Mutex::new(None));
+  let tsfn_holder: SharedTsfn<Buffer> = Arc::new(Mutex::new(None));
+  let write_error_holder: SharedTsfn<()> = Arc::new(Mutex::new(None));
 
   // command channel for write/shutdown etc.
   let (cmd_tx, cmd_rx): (Sender<Command>, Receiver<Command>) = unbounded();
@@ -183,14 +182,14 @@ pub fn open_port(port_path: String, settings: Option<PortSettings>) -> napi::Res
         recv(cmd_rx) -> msg => {
           match msg {
             Ok(Command::Write(data)) => {
-                  if let Err(e) = port.write_all(&data) {
-                    // write error: attempt to surface this to JS via the onWriteError TSFN if present
-                    if let Some(tsfn) = write_error_for_thread.lock().unwrap().as_ref() {
-                      let _ = tsfn.call(
-                        Err(napi::Error::from_reason(format!("write failed: {}", e))),
-                        ThreadsafeFunctionCallMode::NonBlocking,
-                      );
-                    }
+              if let Err(e) = port.write_all(&data) {
+                // write error: attempt to surface this to JS via the onWriteError TSFN if present
+                if let Some(tsfn) = write_error_for_thread.lock().unwrap().as_ref() {
+                  let _ = tsfn.call(
+                    Err(napi::Error::from_reason(format!("write failed: {}", e))),
+                    ThreadsafeFunctionCallMode::NonBlocking,
+                  );
+                }
                 // keep the worker alive and continue listening for commands
                 continue;
               }
@@ -210,7 +209,7 @@ pub fn open_port(port_path: String, settings: Option<PortSettings>) -> napi::Res
             Ok(n) if n > 0 => {
               let v = &buf[..n];
               if let Some(tsfn) = tsfn_for_thread.lock().unwrap().as_ref() {
-                let _ = tsfn.call(Ok(Buffer::from(v)), ThreadsafeFunctionCallMode::NonBlocking);
+                let _ = tsfn.call(Ok(Buffer::from(v)), ThreadsafeFunctionCallMode::Blocking);
               }
             }
             Ok(_) => {

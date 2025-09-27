@@ -6,5 +6,5 @@ pub mod types;
 
 pub use open_port::OpenPort;
 pub use ports::list_ports;
-pub use ports::Port;
+pub use ports::AvailablePort;
 pub use types::{DataBits, FlowControl, Parity, PortSettings, StopBits};

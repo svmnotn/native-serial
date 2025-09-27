@@ -28,50 +28,64 @@ If you're developing locally you'll need Rust and the Node toolchain (see "Build
 
 ## Quick API overview
 
-Exports (from the native addon):
+Public exports (from the native addon):
 
-- `list_ports(): Promise<Port[]>` — list available serial ports
+- `listPorts(): Array<AvailablePort>` — synchronously list available serial ports
 
-`Port` (object) has the following fields and methods:
+Types / classes:
 
-- `path: string` — path to device (e.g. `/dev/ttyUSB0` or `COM3`)
-- `type: string` — port type ("Usb", "Bluetooth", "Pci", "Unknown")
-- `usbInfo?: { vid, pid, serial?, manufacturer?, product? }` — USB-specific fields when available
-- `open(settings?: PortSettings): OpenPort` — open the port using optional settings
+- `AvailablePort`
+  - `readonly path: string` — path to device (e.g. `/dev/ttyUSB0` or `COM3`)
+  - `readonly type: string` — port type ("Usb", "Bluetooth", "Pci", "Unknown")
+  - `readonly usb?: UsbInfo` — USB-specific fields when available
+  - `open(settings?: PortSettings | null | undefined): OpenPort` — open the port
 
-`OpenPort` (object returned from `open`) methods and settable properties:
+- `OpenPort` (returned by `AvailablePort.open`)
+  - `write(data: Uint8Array): void` — enqueue bytes to be written to the port
+  - `onDataReceived(callback?: (err: Error | null, data: Buffer) => void | null | undefined): void` — receive incoming data
+  - `onWriteError(callback?: (err: Error | null) => void | null | undefined): void` — receive write errors
+  - `close(): void` — close the port and stop the worker
 
-- `write(data: Buffer | Uint8Array)` — enqueue bytes to be written to the port
-- `onDataReceived = (err, data) => {}` — set a callback to receive incoming data (Buffer)
-- `onWriteError = (err) => {}` — set a callback to receive write errors
-- `close()` — close the port and stop the worker
+Enums (exported):
 
-`PortSettings` (optional) object fields:
+- `DataBits` — 'Five' | 'Six' | 'Seven' | 'Eight'
+- `FlowControl` — 'None' | 'Software' | 'Hardware'
+- `Parity` — 'None' | 'Odd' | 'Even'
+- `StopBits` — 'One' | 'Two'
 
-- `baud_rate?: number` — default 115200
-- `timeout_ms?: number` — read timeout in milliseconds (default 10)
-- `data_bits?: 'Five'|'Six'|'Seven'|'Eight'`
-- `parity?: 'None'|'Odd'|'Even'`
-- `stop_bits?: 'One'|'Two'`
-- `flow_control?: 'None'|'Software'|'Hardware'`
+Settings and helper types:
 
-See `src/types.rs`, `src/ports.rs` and `src/open_port.rs` for the exact behavior and defaults.
+- `PortSettings` (optional) object fields:
+  - `baudRate?: number` — baud rate (defaults to 115200)
+  - `timeoutMs?: number` — read timeout in milliseconds (default is 10ms)
+  - `dataBits?: DataBits`
+  - `parity?: Parity`
+  - `stopBits?: StopBits`
+  - `flowControl?: FlowControl`
+
+- `UsbInfo`:
+  - `readonly vid: number`
+  - `readonly pid: number`
+  - `readonly serial?: string`
+  - `readonly manufacturer?: string`
+  - `readonly product?: string`
 
 ## Example
 
 ```ts
-import { list_ports } from 'native-serial';
+import { listPorts } from 'native-serial';
 
-const ports = list_ports();
+const ports = listPorts();
 if (!ports.length) {
   console.log('No serial ports found');
-  return;
+  process.exit(0);
 }
 
 const port = ports[0];
 console.log('Opening', port.path);
 
-const open = port.open({ baud_rate: 115200 });
+// Open with optional settings
+const open = port.open({ baudRate: 115200 });
 
 // onDataReceived receives (err, buffer)
 open.onDataReceived((err, buf) => {
@@ -79,20 +93,23 @@ open.onDataReceived((err, buf) => {
     console.error('read error', err);
     return;
   }
+  // `buf` is a Node Buffer instance
   console.log('received', Buffer.from(buf).toString('hex'));
 });
 
 // optional: handle write errors
-open.onWriteError(err => console.error('write error', err));
+open.onWriteError(err => {
+  if (err) console.error('write error', err);
+});
 
-// write some bytes
-open.write(Buffer.from([0x01, 0x02, 0x03]));
+// write some bytes (Uint8Array or Buffer)
+open.write(new Uint8Array([0x01, 0x02, 0x03]));
 
 // ... later
 open.close();
 ```
 
-TypeScript users can use `index.d.ts` for typings that match the Rust-exported types.
+TypeScript users can rely on the shipped `index.d.ts` for types.
 
 ## Build from source
 
@@ -135,8 +152,8 @@ describing the change and its rationale.
 
 When developing:
 
-- Keep code formatted (Rust: `cargo fmt`, JS: `prettier`)
-- Run tests before opening a PR
+- Keep code formatted (`yarn format`)
+- Run tests before opening a PR (`yarn test`)
 
 ## License
 
