@@ -38,12 +38,10 @@ Types / classes:
   - `readonly path: string` — path to device (e.g. `/dev/ttyUSB0` or `COM3`)
   - `readonly type: string` — port type ("Usb", "Bluetooth", "Pci", "Unknown")
   - `readonly usb?: UsbInfo` — USB-specific fields when available
-  - `open(settings?: PortSettings | null | undefined): OpenPort` — open the port
+  - `open(onDataReceived: (data: Buffer) => void, onError: (err: Error | null) => void, settings?: PortSettings | null | undefined): OpenPort` — open the port and register callbacks
 
 - `OpenPort` (returned by `AvailablePort.open`)
-  - `write(data: Uint8Array): void` — enqueue bytes to be written to the port
-  - `onDataReceived(callback?: (err: Error | null, data: Buffer) => void | null | undefined): void` — receive incoming data
-  - `onWriteError(callback?: (err: Error | null) => void | null | undefined): void` — receive write errors
+  - `write(data: Buffer): void` — enqueue bytes to be written to the port
   - `close(): void` — close the port and stop the worker
 
 Enums (exported):
@@ -84,26 +82,21 @@ if (!ports.length) {
 const port = ports[0];
 console.log('Opening', port.path);
 
-// Open with optional settings
-const open = port.open({ baudRate: 115200 });
+// Open with callbacks and optional settings
+const open = port.open(
+  // onDataReceived: receives a Buffer
+  buf => {
+    console.log('received', buf.toString('hex'));
+  },
+  // onError: receives an Error or null
+  err => {
+    if (err) console.error('port error', err);
+  },
+  { baudRate: 115200 },
+);
 
-// onDataReceived receives (err, buffer)
-open.onDataReceived((err, buf) => {
-  if (err) {
-    console.error('read error', err);
-    return;
-  }
-  // `buf` is a Node Buffer instance
-  console.log('received', Buffer.from(buf).toString('hex'));
-});
-
-// optional: handle write errors
-open.onWriteError(err => {
-  if (err) console.error('write error', err);
-});
-
-// write some bytes (Uint8Array or Buffer)
-open.write(new Uint8Array([0x01, 0x02, 0x03]));
+// write some bytes (Buffer)
+open.write(Buffer.from([0x01, 0x02, 0x03]));
 
 // ... later
 open.close();

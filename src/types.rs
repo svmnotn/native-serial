@@ -1,8 +1,5 @@
 use napi::bindgen_prelude::ToNapiValue;
-use napi::threadsafe_function::ThreadsafeFunction;
 use napi_derive::napi;
-
-use std::sync::{Arc, Mutex};
 
 #[napi(string_enum)]
 pub enum DataBits {
@@ -41,12 +38,6 @@ pub struct PortSettings {
   pub parity: Option<Parity>,
   pub stop_bits: Option<StopBits>,
   pub flow_control: Option<FlowControl>,
-}
-
-// Commands sent to the single-threaded worker that owns the serial port
-pub enum Command {
-  Write(Vec<u8>),
-  Shutdown,
 }
 
 // A small struct to surface USB-specific fields from SerialPortType::UsbPort
@@ -93,5 +84,3 @@ impl ToNapiValue for &mut UsbInfo {
     napi::bindgen_prelude::Object::to_napi_value(env, obj)
   }
 }
-
-pub type SharedTsfn<T> = Arc<Mutex<Option<ThreadsafeFunction<T, ()>>>>;

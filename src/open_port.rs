@@ -2,90 +2,50 @@ use napi::bindgen_prelude::Buffer;
 use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
 use napi_derive::napi;
 
-use std::sync::{Arc, Mutex};
+use std::io::{Read, Write};
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crossbeam::channel::{after, unbounded, Receiver, Sender};
+use crossbeam::channel::{bounded, unbounded, Receiver, RecvError, Sender};
 
-use crate::types::{Command, PortSettings, SharedTsfn};
+use crate::types::PortSettings;
+
+pub type OnDataReceivedCallback = ThreadsafeFunction<Buffer, (), Buffer, napi::Status, false>;
+pub type OnErrorCallback = ThreadsafeFunction<(), ()>;
 
 #[napi]
 pub struct OpenPort {
-  // worker thread that owns the port and performs both reads and writes
-  worker_thread: Option<thread::JoinHandle<()>>,
-  // TSFN shared between JS setter and worker
-  tsfn: SharedTsfn<Buffer>,
-  // separate TSFN for write errors
-  write_error_tsfn: SharedTsfn<()>,
-  // sender for control / write commands
-  cmd_tx: Sender<Command>,
+  // thread handles, wrapped in an option so we can join them without having to take self without reference
+  read_thread: Option<thread::JoinHandle<()>>,
+  write_thread: Option<thread::JoinHandle<()>>,
+  // sender for writes
+  write_tx: Sender<Buffer>,
+  // sender is wrapped in an option so we can drop it without having to take self without reference
+  kill_tx: Option<Sender<()>>,
 }
 
 #[napi]
 impl OpenPort {
   #[napi]
-  pub fn write(&self, data: &[u8]) -> napi::Result<()> {
+  pub fn write(&self, data: Buffer) -> napi::Result<()> {
     self
-      .cmd_tx
-      .send(Command::Write(data.to_vec()))
-      .map_err(|e| napi::Error::from_reason(format!("failed to send write command: {}", e)))?;
-    Ok(())
-  }
-
-  // settable property: open.onDataReceived = (err, data) => { ... }
-  #[napi(js_name = "onDataReceived")]
-  pub fn set_on_data_received(
-    &self,
-    callback: Option<ThreadsafeFunction<Buffer, ()>>,
-  ) -> napi::Result<()> {
-    // Drop existing TSFN
-    {
-      let mut guard = self.tsfn.lock().unwrap();
-      *guard = None;
-    }
-
-    if let Some(tsfn) = callback {
-      let mut guard = self.tsfn.lock().unwrap();
-      *guard = Some(tsfn);
-    }
-
-    Ok(())
-  }
-
-  // settable property: open.onWriteError = (err) => { ... }
-  #[napi(js_name = "onWriteError")]
-  pub fn set_on_write_error(
-    &self,
-    callback: Option<ThreadsafeFunction<(), ()>>,
-  ) -> napi::Result<()> {
-    // Drop existing TSFN
-    {
-      let mut guard = self.write_error_tsfn.lock().unwrap();
-      *guard = None;
-    }
-
-    if let Some(tsfn) = callback {
-      let mut guard = self.write_error_tsfn.lock().unwrap();
-      *guard = Some(tsfn);
-    }
-
-    Ok(())
+      .write_tx
+      .send(data)
+      .map_err(|e| napi::Error::from_reason(format!("failed to send write to thread: {e}")))
   }
 
   #[napi]
   pub fn close(&mut self) -> napi::Result<()> {
-    // Drop TSFN so worker won't call into JS.
-    {
-      let mut ts = self.tsfn.lock().unwrap();
-      *ts = None;
-    }
-
-    // Send shutdown command
-    let _ = self.cmd_tx.send(Command::Shutdown);
+    // Close the send side of the write channel to signal the threads to exit
+    drop(self.kill_tx.take());
 
     // Join worker thread
-    if let Some(handle) = self.worker_thread.take() {
+    if let Some(handle) = self.write_thread.take() {
+      let _ = handle.join();
+    }
+
+    if let Some(handle) = self.read_thread.take() {
       let _ = handle.join();
     }
 
@@ -140,7 +100,28 @@ fn apply_builder_settings(
   builder
 }
 
-pub fn open_port(port_path: &str, settings: Option<PortSettings>) -> napi::Result<OpenPort> {
+// Make the opened port non-exclusive on platforms that support it.
+// On Unix-like platforms the underlying TTY port supports `set_exclusive`.
+// On Windows this is a no-op because the COM port implementation doesn't expose it.
+#[cfg(unix)]
+fn make_port_nonexclusive(port: &mut serialport::TTYPort, path: &str) -> napi::Result<()> {
+  port.set_exclusive(false).map_err(|e| {
+    napi::Error::from_reason(format!("failed to make the port {path} not exclusive: {e}"))
+  })
+}
+
+// No-op on Windows
+#[cfg(windows)]
+fn make_port_nonexclusive(_: &mut serialport::COMPort, _: &str) -> napi::Result<()> {
+  Ok(())
+}
+
+pub fn open_port(
+  path: &str,
+  on_data_received: ThreadsafeFunction<Buffer, (), Buffer, napi::Status, false>,
+  on_error: ThreadsafeFunction<(), ()>,
+  settings: Option<PortSettings>,
+) -> napi::Result<OpenPort> {
   let settings = settings.unwrap_or(PortSettings {
     baud_rate: Some(115_200),
     timeout_ms: Some(10),
@@ -153,75 +134,72 @@ pub fn open_port(port_path: &str, settings: Option<PortSettings>) -> napi::Resul
   let baud = settings.baud_rate.unwrap_or(115_200);
   let timeout = Duration::from_millis(settings.timeout_ms.unwrap_or(10) as u64);
 
-  let builder = serialport::new(port_path, baud);
+  let builder = serialport::new(path, baud);
   let builder = apply_builder_settings(builder, &settings).timeout(timeout);
 
-  let sp = builder
-    .open()
-    .map_err(|e| napi::Error::from_reason(format!("failed to open {}: {}", port_path, e)))?;
+  let mut read_port = builder
+    .open_native()
+    .map_err(|e| napi::Error::from_reason(format!("failed to open: {e}")))?;
 
-  // TSFN holder shared with API setter and worker
-  let tsfn_holder: SharedTsfn<Buffer> = Arc::new(Mutex::new(None));
-  let write_error_holder: SharedTsfn<()> = Arc::new(Mutex::new(None));
+  make_port_nonexclusive(&mut read_port, path)?;
+
+  let mut write_port = read_port
+    .try_clone_native()
+    .map_err(|e| napi::Error::from_reason(format!("failed to clone port: {e}")))?;
 
   // command channel for write/shutdown etc.
-  let (cmd_tx, cmd_rx): (Sender<Command>, Receiver<Command>) = unbounded();
+  let (kill_tx, kill_rx_read): (Sender<()>, Receiver<()>) = bounded(0);
+  let kill_rx_write = kill_rx_read.clone();
 
-  // worker thread owns the serial port (no other locks for reads/writes)
-  let tsfn_for_thread = tsfn_holder.clone();
-  let write_error_for_thread = write_error_holder.clone();
+  let (write_tx, write_rx): (Sender<Buffer>, Receiver<Buffer>) = unbounded();
 
-  let handle = thread::spawn(move || {
-    let mut port = sp; // owns the serial port
-    let mut buf = [0u8; 1024];
+  let on_error = Arc::new(on_error);
+  let read_on_error = on_error.clone();
+  let write_on_error = on_error;
 
+  let read_handle = thread::spawn(move || {
     loop {
-      // Use crossbeam select with a timeout tick to alternate between handling commands
-      // and attempting reads from the port.
       crossbeam::select! {
-        recv(cmd_rx) -> msg => {
-          match msg {
-            Ok(Command::Write(data)) => {
-              if let Err(e) = port.write_all(&data) {
-                // write error: attempt to surface this to JS via the onWriteError TSFN if present
-                if let Some(tsfn) = write_error_for_thread.lock().unwrap().as_ref() {
-                  let _ = tsfn.call(
-                    Err(napi::Error::from_reason(format!("write failed: {}", e))),
-                    ThreadsafeFunctionCallMode::NonBlocking,
-                  );
-                }
-                // keep the worker alive and continue listening for commands
-                continue;
-              }
-              let _ = port.flush();
+        // Shutdown requested
+        recv(kill_rx_read) -> _ => break,
+        default() => {
+          let mut buf = [0u8; 1024];
+          match read_port.read(&mut buf) {
+            Ok(n) if n > 0 => {
+              let _ = on_data_received.call(Buffer::from(&buf[..n]), ThreadsafeFunctionCallMode::Blocking);
             }
-            Ok(Command::Shutdown) | Err(_) => {
-              // Shutdown requested or sender dropped
-              let _ = port.flush();
+            // zero bytes, continue
+            Ok(_) => continue,
+            // normal: no data this iteration
+            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => continue,
+            // unrecoverable error or port closed -> exit
+            Err(e) => {
+              let _ = read_on_error.call(Err(napi::Error::from_reason(format!("read thread died due to {e}"))), ThreadsafeFunctionCallMode::NonBlocking);
               break;
             }
           }
         }
-        recv(after(timeout)) -> _ => {
-          // Time to attempt a read; port is configured with the same timeout but this pattern keeps
-          // us responsive to commands.
-          match port.read(&mut buf) {
-            Ok(n) if n > 0 => {
-              let v = &buf[..n];
-              if let Some(tsfn) = tsfn_for_thread.lock().unwrap().as_ref() {
-                let _ = tsfn.call(Ok(Buffer::from(v)), ThreadsafeFunctionCallMode::Blocking);
+      }
+    }
+  });
+
+  let write_handle = thread::spawn(move || {
+    loop {
+      crossbeam::select! {
+        // Shutdown requested
+        recv(kill_rx_write) -> _ => break,
+        // Write data
+        recv(write_rx) -> msg => {
+          match msg {
+            Ok(data) => {
+              if let Err(e) = write_port.write_all(&data) {
+                let _ = write_on_error.call(Err(napi::Error::from_reason(format!("failed to write: {e}"))), ThreadsafeFunctionCallMode::NonBlocking);
+                continue;
               }
             }
-            Ok(_) => {
-              // zero bytes, continue
-              continue;
-            }
-            Err(ref e) if e.kind() == std::io::ErrorKind::TimedOut => {
-              // normal: no data this iteration
-              continue;
-            }
-            Err(_) => {
-              // unrecoverable error or port closed -> exit
+            // channel closed, exit
+            Err(RecvError) => {
+              let _ = write_on_error.call(Err(napi::Error::from_reason(format!("write channel closed?!"))), ThreadsafeFunctionCallMode::NonBlocking);
               break;
             }
           }
@@ -231,9 +209,9 @@ pub fn open_port(port_path: &str, settings: Option<PortSettings>) -> napi::Resul
   });
 
   Ok(OpenPort {
-    worker_thread: Some(handle),
-    tsfn: tsfn_holder,
-    write_error_tsfn: write_error_holder,
-    cmd_tx,
+    kill_tx: Some(kill_tx),
+    read_thread: Some(read_handle),
+    write_thread: Some(write_handle),
+    write_tx,
   })
 }

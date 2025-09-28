@@ -4,13 +4,15 @@ export declare class AvailablePort {
   readonly path: string;
   readonly type: string;
   readonly usb?: UsbInfo;
-  open(settings?: PortSettings | undefined | null): OpenPort;
+  open(
+    onDataReceived: (arg: Buffer) => void,
+    onError: (err: Error | null) => void,
+    settings?: PortSettings | undefined | null,
+  ): OpenPort;
 }
 
 export declare class OpenPort {
-  write(data: Uint8Array): void;
-  onDataReceived(callback?: ((err: Error | null, arg: Buffer) => void) | undefined | null): void;
-  onWriteError(callback?: ((err: Error | null) => void) | undefined | null): void;
+  write(data: Buffer): void;
   close(): void;
 }
 

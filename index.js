@@ -3,7 +3,12 @@
 const { DataBits, FlowControl, OpenPort, Parity, StopBits, listPorts: lp, AvailablePort } = require('./build.js');
 
 function listPorts() {
-  return lp().map(p => ({ open: s => p.open(s), path: p.path, type: p.type, usb: p.usb }));
+  return lp().map(p => ({
+    open: (onDataReceived, onError, settings) => p.open(onDataReceived, onError, settings),
+    path: p.path,
+    type: p.type, 
+    usb: p.usb
+  }));
 }
 
 module.exports = {

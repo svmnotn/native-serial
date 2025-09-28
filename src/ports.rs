@@ -1,5 +1,7 @@
 use crate::open_port::open_port;
 use crate::types::{PortSettings, UsbInfo};
+use napi::bindgen_prelude::Buffer;
+use napi::threadsafe_function::ThreadsafeFunction;
 use napi_derive::napi;
 use serialport::{SerialPortInfo, SerialPortType};
 
@@ -16,8 +18,13 @@ pub struct AvailablePort {
 #[napi]
 impl AvailablePort {
   #[napi]
-  pub fn open(&self, settings: Option<PortSettings>) -> napi::Result<crate::open_port::OpenPort> {
-    open_port(&self.path, settings)
+  pub fn open(
+    &self,
+    on_data_received: ThreadsafeFunction<Buffer, (), Buffer, napi::Status, false>,
+    on_error: ThreadsafeFunction<(), ()>,
+    settings: Option<PortSettings>,
+  ) -> napi::Result<crate::open_port::OpenPort> {
+    open_port(&self.path, on_data_received, on_error, settings)
   }
 }
 
