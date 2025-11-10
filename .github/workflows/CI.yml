@@ -4,6 +4,8 @@ env:
   APP_NAME: native-serial
   MACOSX_DEPLOYMENT_TARGET: '10.13'
   CARGO_INCREMENTAL: '1'
+  PKG_CONFIG_ALLOW_CROSS: 1
+  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 on:
   push:
     branches:
@@ -24,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Setup node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@v6
         with:
           node-version: 24
           cache: yarn
@@ -35,8 +37,8 @@ jobs:
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libudev-dev
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y libudev-dev
       - name: Install dependencies
         run: yarn install
       - name: Oxlint
@@ -57,12 +59,18 @@ jobs:
             build: yarn build --target x86_64-pc-windows-msvc
             target: x86_64-pc-windows-msvc
           - host: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            build: yarn build --target x86_64-unknown-linux-gnu
+          - host: ubuntu-latest
             target: x86_64-unknown-linux-musl
             build: yarn build --target x86_64-unknown-linux-musl -x
           - host: macos-latest
             target: aarch64-apple-darwin
             build: yarn build --target aarch64-apple-darwin
-          - host: ubuntu-latest
+          - host: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            build: yarn build --target aarch64-unknown-linux-gnu
+          - host: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             build: yarn build --target aarch64-unknown-linux-musl -x
           - host: windows-latest
@@ -94,12 +102,10 @@ jobs:
             target/
           key: ${{ matrix.settings.target }}-cargo-${{ matrix.settings.host }}
       - uses: mlugg/setup-zig@v2
-        if: ${{ contains(matrix.settings.target, 'musl') }}
         with:
-          version: 0.14.1
+          version: 0.15.2
       - name: Install cargo-zigbuild
         uses: taiki-e/install-action@v2
-        if: ${{ contains(matrix.settings.target, 'musl') }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
         with:
@@ -111,8 +117,8 @@ jobs:
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libudev-dev
+          sudo apt-get -qq update
+          sudo apt-get -qq install -y pkg-config libudev-dev
       - name: Install dependencies
         run: yarn install
       - name: Build
@@ -178,7 +184,9 @@ jobs:
       matrix:
         target:
           - x86_64-unknown-linux-musl
+          - x86_64-unknown-linux-gnu
           - aarch64-unknown-linux-musl
+          - aarch64-unknown-linux-gnu
         node:
           - '24'
     runs-on: ${{ contains(matrix.target, 'aarch64') && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
